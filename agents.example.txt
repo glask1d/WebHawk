@@ -1,0 +1,6 @@
+# One User-Agent per line. Blank lines and # comments are ignored.
+WebHawk/2.1 (coffee-powered; pecks certificates for sport)
+Mozilla/4.0 (PSP (PlayStation Portable); 2.00)                                                                           Opera/9.23 (Nintendo Wii; U; ; 1038-58; Wii Internet Channel/1.0; en)
+Mozilla/5.0 (Nintendo Switch; WifiWebAuthApplet) AppleWebKit/601.6 (KHTML, like Gecko) NF/4.0.0.8.9 NintendoBrowser/5.1.0.16739
+NCSA_Mosaic/2.0 (Windows 3.1)
+IBrowse/2.4 (AmigaOS 3.9; 68k)

@@ -1,0 +1,6 @@
+# One path per line. A leading slash is added if missing.
+/
+robots.txt
+favicon.ico
+admin
+login

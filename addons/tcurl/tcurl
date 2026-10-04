@@ -1,0 +1,1215 @@
+#!/usr/bin/env bash
+# tcurl — fetch a URL with curl through Tor.
+#
+# Prints the exit IP above the response. Long responses open at the
+# first line in less, so the start stays on screen.
+#
+# The IP check and the fetch share a SOCKS username, which pins both
+# streams to the same Tor circuit.
+
+set -u
+
+name=${0##*/}
+
+red='' grn='' yel='' mag='' cyn='' bold='' dim='' rst=''
+bar_c=''
+tor_label='confirmed'
+no_pager=0
+color_mode=auto
+use_color=0
+verbose=0
+is_head=0
+force_get=0
+has_data=0
+user_remote=0
+user_w=0
+user_dump=0
+user_out=''
+dump_path=''
+explicit_method=''
+method='GET'
+url=''
+url_count=0
+ip=''
+istor=''
+elapsed=''
+captured_body=0
+http_code=''
+time_total=''
+size_download=''
+content_type=''
+url_effective=''
+filename_effective=''
+user_w_out=''
+tmp=''
+rc=0
+curl_args=()
+
+usage() {
+  cat <<EOF
+${name} — curl through Tor
+
+usage:
+  ${name} [options] <url> [curl options...]
+  ${name} [options] [curl options...] <url>
+
+Fetches the url with curl under torsocks and prints the Tor exit IP
+above the response. A bare hostname is requested as https://.
+
+options:
+  --no-pager   print the response straight to the terminal
+  --raw        same as --no-pager
+  --no-color   plain text
+  --color      color the banner even when output is piped
+  -h, --help   show this help
+
+A long response opens at the first line in less, with the exit IP
+above it. When the response fits on the screen, it prints and returns
+to the prompt. In less: space pages down, b pages up, q quits.
+
+HTML, JSON, and HTTP headers are highlighted on screen. --no-color
+prints them plain. Piped output stays plain either way.
+
+Every other argument is passed through to curl.
+
+examples:
+  ${name} example.com
+  ${name} -I example.com
+  ${name} example.com -L -H 'Accept: application/json'
+  ${name} --no-pager example.com
+EOF
+}
+
+takes_short() {
+  case "$1" in
+    [ACDEFHKPQTUXYbcdehmortuwxyz]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+takes_long() {
+  case "$1" in
+    abstract-unix-socket|alt-svc|aws-sigv4|cacert|capath|cert|cert-type|ciphers|\
+    config|connect-timeout|connect-to|continue-at|cookie|cookie-jar|create-file-mode|\
+    crlfile|curves|data|data-ascii|data-binary|data-raw|data-urlencode|delegation|\
+    dns-interface|dns-ipv4-addr|dns-ipv6-addr|dns-servers|doh-url|dump-header|ech|\
+    egd-file|engine|etag-compare|etag-save|expect100-timeout|form|form-string|\
+    ftp-account|ftp-alternative-to-user|ftp-method|ftp-port|ftp-ssl-ccc-mode|\
+    happy-eyeballs-timeout-ms|haproxy-clientip|header|help|hostpubmd5|hostpubsha256|\
+    hsts|interface|ip-tos|ipfs-gateway|json|keepalive-cnt|keepalive-time|key|key-type|\
+    krb|libcurl|limit-rate|local-port|login-options|mail-auth|mail-from|mail-rcpt|\
+    max-filesize|max-redirs|max-time|netrc-file|noproxy|oauth2-bearer|output|\
+    output-dir|parallel-max|pass|pinnedpubkey|preproxy|proto|proto-default|proto-redir|\
+    proxy|proxy-cacert|proxy-capath|proxy-cert|proxy-cert-type|proxy-ciphers|\
+    proxy-crlfile|proxy-header|proxy-key|proxy-key-type|proxy-pass|proxy-pinnedpubkey|\
+    proxy-service-name|proxy-tls13-ciphers|proxy-tlsauthtype|proxy-tlspassword|\
+    proxy-tlsuser|proxy-user|proxy1.0|pubkey|quote|random-file|range|rate|referer|\
+    request|request-target|resolve|retry|retry-delay|retry-max-time|sasl-authzid|\
+    service-name|sigalgs|socks4|socks4a|socks5|socks5-gssapi-service|socks5-hostname|\
+    speed-limit|speed-time|ssl-sessions|stderr|telnet-option|tftp-blksize|time-cond|\
+    tls-max|tls13-ciphers|tlsauthtype|tlspassword|tlsuser|trace|trace-ascii|\
+    trace-config|unix-socket|upload-file|upload-flags|url|url-query|user|user-agent|\
+    variable|vlan-priority|write-out)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_url() {
+  local u=$1
+  if [[ -z "$u" || "$u" == *" "* || "$u" == "-" || "$u" == /* || "$u" == *"://"* ]]; then
+    printf '%s' "$u"
+    return
+  fi
+  if [[ "$u" == //* ]]; then
+    printf 'https:%s' "$u"
+    return
+  fi
+  printf 'https://%s' "$u"
+}
+
+human_bytes() {
+  local n=${1:-}
+  if [[ -z "$n" || ! "$n" =~ ^[0-9]+$ ]]; then
+    printf '%s' "-"
+    return
+  fi
+  awk -v n="$n" 'BEGIN {
+    split("B KB MB GB TB", u, " ")
+    i = 1
+    while (n >= 1024 && i < 5) { n /= 1024; i++ }
+    if (i == 1) printf "%d %s", n, u[i]
+    else printf "%.1f %s", n, u[i]
+  }'
+}
+
+human_time() {
+  if [[ -z "${1:-}" ]]; then
+    printf '%s' "-"
+    return
+  fi
+  awk -v t="$1" 'BEGIN { printf "%.2fs", t + 0 }'
+}
+
+init_colors() {
+  use_color=0
+  if [[ "$color_mode" == always ]]; then
+    use_color=1
+  elif [[ "$color_mode" == never ]]; then
+    use_color=0
+  elif [[ -z "${NO_COLOR:-}" && ( -t 1 || -t 2 ) ]]; then
+    use_color=1
+  fi
+  if (( use_color )); then
+    rst=$'\033[0m'
+    bold=$'\033[1m'
+    dim=$'\033[2m'
+    red=$'\033[31m'
+    grn=$'\033[32m'
+    yel=$'\033[33m'
+    mag=$'\033[35m'
+    cyn=$'\033[36m'
+  fi
+  bar_c=$grn
+}
+
+progress() {
+  if [[ -t 2 ]]; then
+    printf '\r\033[2K%s' "$1" >&2
+  fi
+}
+
+progress_clear() {
+  if [[ -t 2 ]]; then
+    printf '\r\033[2K' >&2
+  fi
+}
+
+cleanup() {
+  if [[ -n "${tmp:-}" && -d "$tmp" ]]; then
+    rm -rf -- "$tmp"
+  fi
+}
+
+on_int() {
+  printf '\r\033[2K' >&2 || true
+  exit 130
+}
+
+die() {
+  progress_clear
+  printf '%stcurl:%s %s\n' "$red" "$rst" "$1" >&2
+  if [[ -n "${2:-}" && -s "$2" ]]; then
+    cat -- "$2" >&2
+  fi
+  exit 1
+}
+
+mark_data_key() {
+  case "$1" in
+    d|F|data|data-ascii|data-binary|data-raw|data-urlencode|json|form|form-string)
+      has_data=1 ;;
+  esac
+}
+
+add_url() {
+  local u
+  u=$(normalize_url "$1")
+  url_count=$((url_count + 1))
+  if (( url_count == 1 )); then
+    url=$u
+  fi
+  curl_args+=("$u")
+}
+
+parse_args() {
+  local -a pending=()
+  local i n a key val c rest cluster next j len take_next take_char has_val
+
+  while (( $# )); do
+    case "$1" in
+      --no-pager|--raw) no_pager=1; shift ;;
+      --no-color) color_mode=never; shift ;;
+      --color) color_mode=always; shift ;;
+      -h|--help) usage; exit 0 ;;
+      --)
+        shift
+        pending+=("$@")
+        break
+        ;;
+      *)
+        pending+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  i=0
+  n=${#pending[@]}
+  while (( i < n )); do
+    a=${pending[i]}
+
+    if [[ "$a" == "--" ]]; then
+      curl_args+=("--")
+      i=$((i + 1))
+      while (( i < n )); do
+        add_url "${pending[i]}"
+        i=$((i + 1))
+      done
+      break
+    fi
+
+    if [[ "$a" == --* ]]; then
+      key=${a#--}
+      val=''
+      has_val=0
+      if [[ "$key" == *=* ]]; then
+        val=${key#*=}
+        key=${key%%=*}
+        has_val=1
+      fi
+
+      case "$key" in
+        verbose) verbose=1 ;;
+        trace|trace-ascii) verbose=1 ;;
+        head) is_head=1 ;;
+        get) force_get=1 ;;
+        remote-name|remote-name-all|remote-header-name) user_remote=1 ;;
+      esac
+      mark_data_key "$key"
+
+      if [[ "$key" == request ]]; then
+        if (( has_val )); then
+          explicit_method=$val
+          curl_args+=("$a")
+          i=$((i + 1))
+        else
+          i=$((i + 1))
+          explicit_method=${pending[i]:-}
+          curl_args+=("--request")
+          if (( i < n )); then
+            curl_args+=("${pending[i]}")
+            i=$((i + 1))
+          fi
+        fi
+        continue
+      fi
+
+      if [[ "$key" == url ]]; then
+        if (( has_val )); then
+          local nu
+          nu=$(normalize_url "$val")
+          url_count=$((url_count + 1))
+          if (( url_count == 1 )); then
+            url=$nu
+          fi
+          curl_args+=("--url=${nu}")
+          i=$((i + 1))
+        else
+          i=$((i + 1))
+          curl_args+=("--url")
+          if (( i < n )); then
+            add_url "${pending[i]}"
+            i=$((i + 1))
+          fi
+        fi
+        continue
+      fi
+
+      if [[ "$key" == output ]]; then
+        if (( has_val )); then
+          if [[ "$val" != "-" ]]; then
+            user_out=$val
+            curl_args+=("$a")
+          fi
+          i=$((i + 1))
+        else
+          i=$((i + 1))
+          next=${pending[i]:-}
+          if [[ "$next" == "-" ]]; then
+            i=$((i + 1))
+          else
+            user_out=$next
+            curl_args+=("--output")
+            if (( i < n )); then
+              curl_args+=("$next")
+              i=$((i + 1))
+            fi
+          fi
+        fi
+        continue
+      fi
+
+      if [[ "$key" == dump-header ]]; then
+        user_dump=1
+        if (( has_val )); then
+          dump_path=$val
+          curl_args+=("$a")
+          i=$((i + 1))
+        else
+          curl_args+=("$a")
+          i=$((i + 1))
+          if (( i < n )); then
+            dump_path=${pending[i]}
+            curl_args+=("${pending[i]}")
+            i=$((i + 1))
+          fi
+        fi
+        continue
+      fi
+
+      if [[ "$key" == write-out ]]; then
+        user_w=1
+      fi
+
+      if (( has_val )); then
+        curl_args+=("$a")
+        i=$((i + 1))
+        continue
+      fi
+
+      curl_args+=("$a")
+      i=$((i + 1))
+      if takes_long "$key"; then
+        if (( i < n )); then
+          curl_args+=("${pending[i]}")
+          i=$((i + 1))
+        fi
+      fi
+      continue
+    fi
+
+    if [[ "$a" == -* && "$a" != "-" ]]; then
+      cluster=${a#-}
+      len=${#cluster}
+      j=0
+      take_next=0
+      take_char=''
+      while (( j < len )); do
+        c=${cluster:j:1}
+        if takes_short "$c"; then
+          rest=${cluster:j+1}
+          if [[ -n "$rest" ]]; then
+            mark_data_key "$c"
+            case "$c" in
+              X) explicit_method=$rest ;;
+              o)
+                if [[ "$rest" == "-" ]]; then
+                  i=$((i + 1))
+                  continue 2
+                fi
+                user_out=$rest
+                ;;
+              D) user_dump=1; dump_path=$rest ;;
+              w) user_w=1 ;;
+            esac
+          else
+            take_next=1
+            take_char=$c
+          fi
+          break
+        fi
+        case "$c" in
+          v) verbose=1 ;;
+          I) is_head=1 ;;
+          O|J) user_remote=1 ;;
+          G) force_get=1 ;;
+        esac
+        j=$((j + 1))
+      done
+
+      if (( take_next )); then
+        i=$((i + 1))
+        next=${pending[i]:-}
+        mark_data_key "$take_char"
+        case "$take_char" in
+          X) explicit_method=$next ;;
+          o)
+            if [[ "$next" == "-" ]]; then
+              i=$((i + 1))
+              continue
+            fi
+            user_out=$next
+            ;;
+          D) user_dump=1; dump_path=$next ;;
+          w) user_w=1 ;;
+        esac
+        curl_args+=("$a")
+        if (( i < n )); then
+          curl_args+=("$next")
+          i=$((i + 1))
+        fi
+        continue
+      fi
+
+      curl_args+=("$a")
+      i=$((i + 1))
+      continue
+    fi
+
+    add_url "$a"
+    i=$((i + 1))
+  done
+
+  if [[ -n "$explicit_method" ]]; then
+    method=$explicit_method
+  elif (( is_head )); then
+    method=HEAD
+  elif (( has_data && force_get == 0 )); then
+    method=POST
+  else
+    method=GET
+  fi
+}
+
+style_exit() {
+  case "$istor" in
+    true) bar_c=$grn; tor_label='confirmed' ;;
+    false) bar_c=$red; tor_label='not tor' ;;
+    *) bar_c=$yel; tor_label='unverified' ;;
+  esac
+}
+
+emit_identity() {
+  printf '  %s|%s %s%-7s%s %s%s%s  %s%s%s\n' \
+    "$bar_c" "$rst" \
+    "$dim" "exit" "$rst" \
+    "$bold" "$ip" "$rst" \
+    "$bar_c" "$tor_label" "$rst"
+  printf '  %s|%s %s%-7s%s %s%s%s  %s%s%s\n' \
+    "$bar_c" "$rst" \
+    "$dim" "request" "$rst" \
+    "$mag" "$method" "$rst" \
+    "$bold" "$url" "$rst"
+}
+
+emit_outcome() {
+  local code_c code_show tshow ssize saved line
+
+  case "$http_code" in
+    2*) code_c=$grn ;;
+    3*) code_c=$cyn ;;
+    4*) code_c=$yel ;;
+    *) code_c=$red ;;
+  esac
+  if [[ -z "$http_code" || "$http_code" == 000 ]]; then
+    code_show='failed'
+  else
+    code_show=$http_code
+  fi
+  tshow=$(human_time "$time_total")
+  ssize=$(human_bytes "$size_download")
+
+  printf '  %s|%s %s%-7s%s %s%s%s%s  %s%s%s  %s%s%s' \
+    "$bar_c" "$rst" \
+    "$dim" "status" "$rst" \
+    "$code_c" "$bold" "$code_show" "$rst" \
+    "$dim" "$tshow" "$rst" \
+    "$dim" "$ssize" "$rst"
+  if [[ -n "$content_type" ]]; then
+    printf '  %s%s%s' "$dim" "$content_type" "$rst"
+  fi
+  printf '\n'
+
+  if [[ -n "$url_effective" && "$url_effective" != "$url" && "$url_effective" != "$url/" ]]; then
+    printf '  %s|%s %s%-7s%s %s%s%s\n' \
+      "$bar_c" "$rst" "$dim" "final" "$rst" "$bold" "$url_effective" "$rst"
+  fi
+
+  saved=''
+  if [[ -n "$user_out" ]]; then
+    saved=$user_out
+  elif (( user_remote )); then
+    saved=${filename_effective:-current directory}
+  fi
+  if [[ -n "$saved" ]]; then
+    printf '  %s|%s %s%-7s%s %s\n' \
+      "$bar_c" "$rst" "$dim" "saved" "$rst" "$saved"
+  fi
+
+  if [[ -n "$user_w_out" ]]; then
+    printf '  %s|%s %s%-7s%s %s\n' \
+      "$bar_c" "$rst" "$dim" "output" "$rst" "$user_w_out"
+  fi
+
+  if [[ -s "$tmp/err" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -z "$line" ]] && continue
+      printf '  %s|%s %s%-7s%s %s%s%s\n' \
+        "$red" "$rst" "$dim" "error" "$rst" "$red" "$line" "$rst"
+    done < "$tmp/err"
+  elif (( rc != 0 )); then
+    printf '  %s|%s %s%-7s%s %s%s%s\n' \
+      "$red" "$rst" "$dim" "error" "$rst" "$red" "curl exited ${rc}" "$rst"
+  fi
+}
+
+fetch_exit() {
+  local out err rc_ip
+  err=$tmp/ip.err
+  out=$(torsocks curl --silent --show-error --fail --max-time 45 --connect-timeout 20 \
+    -H 'Accept: application/json' \
+    https://check.torproject.org/api/ip 2>"$err") && rc_ip=0 || rc_ip=$?
+  if (( rc_ip == 0 )); then
+    ip=$(printf '%s' "$out" | sed -n 's/.*"IP"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+    istor=$(printf '%s' "$out" | sed -n 's/.*"IsTor"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' | head -n 1)
+    if [[ "$ip" =~ ^[0-9A-Fa-f:.]+$ ]]; then
+      [[ -n "$istor" ]] || istor=unknown
+      return 0
+    fi
+  fi
+
+  out=$(torsocks curl --silent --show-error --fail --max-time 45 --connect-timeout 20 \
+    https://icanhazip.com 2>"$err") && rc_ip=0 || rc_ip=$?
+  if (( rc_ip == 0 )); then
+    ip=$(printf '%s' "$out" | tr -d '[:space:]')
+    if [[ "$ip" =~ ^[0-9A-Fa-f:.]+$ ]]; then
+      istor=unknown
+      return 0
+    fi
+  fi
+  return 1
+}
+
+load_meta() {
+  local line
+  if [[ -s "$tmp/meta" ]]; then
+    IFS=$'\x1f' read -r http_code time_total size_download content_type url_effective filename_effective < "$tmp/meta" || true
+  fi
+  http_code=${http_code//$'\r'/}
+  content_type=${content_type//$'\r'/}
+  url_effective=${url_effective//$'\r'/}
+  filename_effective=${filename_effective//$'\r'/}
+
+  if [[ -z "$http_code" && -s "$tmp/hdr" ]]; then
+    http_code=$(awk 'NR==1 { gsub(/\r/, ""); if ($1 ~ /^HTTP\//) print $2; exit }' "$tmp/hdr")
+  fi
+  if [[ -z "$http_code" && -n "$dump_path" && -s "$dump_path" ]]; then
+    http_code=$(awk 'NR==1 { gsub(/\r/, ""); if ($1 ~ /^HTTP\//) print $2; exit }' "$dump_path")
+  fi
+  if [[ -z "$content_type" && -s "$tmp/hdr" ]]; then
+    content_type=$(awk 'BEGIN{IGNORECASE=1} /^Content-Type:/ {
+      sub(/\r/, "")
+      sub(/^[^:]*:[[:space:]]*/, "")
+      print
+      exit
+    }' "$tmp/hdr")
+  fi
+  if [[ -z "$time_total" ]]; then
+    time_total=${elapsed:-}
+  fi
+  if [[ -z "$size_download" && "${captured_body:-0}" -eq 1 && -s "$tmp/body" ]]; then
+    size_download=$(wc -c < "$tmp/body" | tr -d '[:space:]')
+  fi
+  if [[ "$http_code" == "000" ]]; then
+    http_code=''
+  fi
+}
+
+paint_body() {
+  local n
+  if (( use_color == 0 )) || ! command -v python3 >/dev/null 2>&1; then
+    cat -- "$tmp/body"
+    return
+  fi
+  n=$(wc -c < "$tmp/body" | tr -d '[:space:]')
+  if (( n > 1048576 )); then
+    cat -- "$tmp/body"
+    return
+  fi
+  if ! CONTENT_TYPE=$content_type python3 - "$tmp/body" > "$tmp/paint" << 'TCURL_HL'
+import os, sys
+
+RST = "\033[0m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+RED = "\033[31m"
+GRN = "\033[32m"
+YEL = "\033[33m"
+MAG = "\033[35m"
+CYN = "\033[36m"
+GRAY = "\033[90m"
+
+JS_WORDS = {
+    "async", "await", "break", "case", "catch", "class", "const", "continue",
+    "debugger", "default", "delete", "do", "else", "export", "extends",
+    "finally", "for", "function", "if", "import", "in", "instanceof", "let",
+    "new", "of", "return", "static", "super", "switch", "this", "throw",
+    "try", "typeof", "var", "void", "while", "with", "yield",
+}
+
+
+def wrap(code, text):
+    return code + text + RST
+
+
+def paint_header_line(line):
+    if line.startswith("HTTP/"):
+        i = 0
+        while i < len(line) and not line[i].isspace():
+            i += 1
+        j = i
+        while j < len(line) and line[j].isspace():
+            j += 1
+        k = j
+        while k < len(line) and line[k].isdigit():
+            k += 1
+        code = line[j:k]
+        if i > 0 and len(code) == 3:
+            tone = {"2": "32", "3": "36", "4": "33", "5": "31"}.get(code[:1], "37")
+            return wrap(DIM, line[:i]) + line[i:j] + f"\033[1;{tone}m{code}{RST}" + line[k:]
+    if line[:1] in (" ", "\t") or ":" not in line:
+        return line
+    name, value = line.split(":", 1)
+    if not name or any(ch.isspace() for ch in name):
+        return line
+    return wrap(CYN, name) + wrap(DIM, ":") + value
+
+
+def paint_headers(block):
+    out = []
+    i = 0
+    n = len(block)
+    while i < n:
+        j = block.find("\n", i)
+        if j == -1:
+            line, nl, i = block[i:], "", n
+        else:
+            line, nl, i = block[i:j], "\n", j + 1
+        cr = "\r" if line.endswith("\r") else ""
+        core = line[:-1] if cr else line
+        out.append(paint_header_line(core) + cr + nl)
+    return "".join(out)
+
+
+def split_http(data):
+    if not data.startswith("HTTP/"):
+        return None
+    for sep in ("\r\n\r\n", "\n\n"):
+        idx = data.find(sep)
+        if idx != -1:
+            return data[:idx], sep, data[idx + len(sep):]
+    return data, "", ""
+
+
+def scan_string(data, i, quote):
+    j = i + 1
+    n = len(data)
+    while j < n:
+        if data[j] == "\\":
+            j += 2
+            continue
+        if data[j] == quote:
+            return j + 1
+        if quote == "`" and data[j] == "\n":
+            return j
+        j += 1
+    return n
+
+
+def scan_number(data, i):
+    j = i
+    n = len(data)
+    if data[j] == "-":
+        j += 1
+    if j >= n or not data[j].isdigit():
+        return i + 1
+    if data[j] == "0":
+        j += 1
+    else:
+        while j < n and data[j].isdigit():
+            j += 1
+    if j < n and data[j] == "." and j + 1 < n and data[j + 1].isdigit():
+        j += 2
+        while j < n and data[j].isdigit():
+            j += 1
+    if j < n and data[j] in "eE":
+        k = j + 1
+        if k < n and data[k] in "+-":
+            k += 1
+        if k < n and data[k].isdigit():
+            j = k + 1
+            while j < n and data[j].isdigit():
+                j += 1
+    return j
+
+
+def paint_json(data):
+    out = []
+    i = 0
+    n = len(data)
+    while i < n:
+        ch = data[i]
+        if ch in " \t\r\n":
+            j = i + 1
+            while j < n and data[j] in " \t\r\n":
+                j += 1
+            out.append(data[i:j])
+            i = j
+            continue
+        if ch in "{}[],:":
+            out.append(wrap(GRAY, ch))
+            i += 1
+            continue
+        if ch == '"':
+            j = scan_string(data, i, '"')
+            k = j
+            while k < n and data[k] in " \t\r\n":
+                k += 1
+            tone = CYN if k < n and data[k] == ":" else GRN
+            out.append(wrap(tone, data[i:j]))
+            i = j
+            continue
+        if ch == "-" or ch.isdigit():
+            j = scan_number(data, i)
+            out.append(wrap(YEL, data[i:j]))
+            i = j
+            continue
+        for word in ("true", "false", "null"):
+            if data.startswith(word, i):
+                end = i + len(word)
+                if end == n or data[end] in " \t\r\n,}]":
+                    out.append(wrap(MAG, word))
+                    i = end
+                    break
+        else:
+            out.append(ch)
+            i += 1
+            continue
+    return "".join(out)
+
+
+def paint_js(data):
+    out = []
+    i = 0
+    n = len(data)
+    while i < n:
+        if data.startswith("//", i):
+            j = data.find("\n", i)
+            j = n if j == -1 else j + 1
+            out.append(wrap(DIM, data[i:j]))
+            i = j
+            continue
+        if data.startswith("/*", i):
+            j = data.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            out.append(wrap(DIM, data[i:j]))
+            i = j
+            continue
+        ch = data[i]
+        if ch in "\"'`":
+            j = scan_string(data, i, ch)
+            out.append(wrap(GRN, data[i:j]))
+            i = j
+            continue
+        if ch.isdigit():
+            j = scan_number(data, i)
+            out.append(wrap(YEL, data[i:j]))
+            i = j
+            continue
+        if ch.isalpha() or ch in "_$":
+            j = i + 1
+            while j < n and (data[j].isalnum() or data[j] in "_$"):
+                j += 1
+            word = data[i:j]
+            out.append(wrap(MAG, word) if word in JS_WORDS else word)
+            i = j
+            continue
+        if ch in "{}[]();,.":
+            out.append(wrap(GRAY, ch))
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def paint_css(data):
+    out = []
+    i = 0
+    n = len(data)
+    after_eq = False
+    while i < n:
+        if data.startswith("/*", i):
+            j = data.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            out.append(wrap(DIM, data[i:j]))
+            i = j
+            after_eq = False
+            continue
+        ch = data[i]
+        if ch in "\"'":
+            j = scan_string(data, i, ch)
+            out.append(wrap(GRN, data[i:j]))
+            i = j
+            after_eq = False
+            continue
+        if ch in "{};,":
+            out.append(wrap(GRAY, ch))
+            i += 1
+            after_eq = False
+            continue
+        if ch == ":":
+            out.append(wrap(GRAY, ch))
+            i += 1
+            after_eq = True
+            continue
+        if ch.isspace():
+            j = i + 1
+            while j < n and data[j].isspace():
+                j += 1
+            out.append(data[i:j])
+            i = j
+            continue
+        if ch == "@" or ch.isalpha() or ch in "_-#.":
+            j = i + 1
+            while j < n and (data[j].isalnum() or data[j] in "_-"):
+                j += 1
+            word = data[i:j]
+            if word.startswith("@"):
+                out.append(wrap(MAG, word))
+            elif after_eq:
+                out.append(wrap(GRN, word))
+            else:
+                out.append(wrap(YEL, word))
+            i = j
+            after_eq = False
+            continue
+        out.append(ch)
+        i += 1
+        after_eq = False
+    return "".join(out)
+
+
+def paint_attrs(rest):
+    out = []
+    i = 0
+    n = len(rest)
+    after_eq = False
+    while i < n:
+        ch = rest[i]
+        if ch.isspace():
+            j = i + 1
+            while j < n and rest[j].isspace():
+                j += 1
+            out.append(rest[i:j])
+            i = j
+            continue
+        if ch in ">/" or ch == "?":
+            out.append(wrap(GRAY, ch))
+            i += 1
+            after_eq = False
+            continue
+        if ch == "=":
+            out.append(wrap(GRAY, ch))
+            i += 1
+            after_eq = True
+            continue
+        if ch in "\"'":
+            j = scan_string(rest, i, ch)
+            out.append(wrap(GRN, rest[i:j]))
+            i = j
+            after_eq = False
+            continue
+        j = i + 1
+        while j < n and not rest[j].isspace() and rest[j] not in "=/>\"'?":
+            j += 1
+        word = rest[i:j]
+        out.append(wrap(GRN if after_eq else YEL, word))
+        i = j
+        after_eq = False
+    return "".join(out)
+
+
+def paint_tag(tag):
+    low = tag.lower()
+    if low.startswith("<!--") or low.startswith("<!doctype") or low.startswith("<!") or low.startswith("<?"):
+        return wrap(DIM, tag)
+    end = 2 if tag.startswith("</") else 1
+    k = end
+    while k < len(tag) and (tag[k].isalnum() or tag[k] in ":._-"):
+        k += 1
+    if k == end:
+        return wrap(CYN, tag)
+    return wrap(GRAY, tag[:end]) + wrap(CYN, tag[end:k]) + paint_attrs(tag[k:])
+
+
+def tag_name(tag):
+    end = 2 if tag.startswith("</") else 1
+    k = end
+    while k < len(tag) and (tag[k].isalnum() or tag[k] in ":._-"):
+        k += 1
+    return tag[end:k].lower()
+
+
+def find_close(data, i, name):
+    needle = "</" + name
+    low = data.lower()
+    j = low.find(needle, i)
+    return len(data) if j == -1 else j
+
+
+def paint_markup(data):
+    out = []
+    i = 0
+    n = len(data)
+    mode = ""
+    while i < n:
+        if data.startswith("<!--", i):
+            j = data.find("-->", i + 4)
+            j = n if j == -1 else j + 3
+            out.append(wrap(DIM, data[i:j]))
+            i = j
+            continue
+        if data[i] != "<":
+            if mode == "script":
+                j = find_close(data, i, "script")
+                out.append(paint_js(data[i:j]))
+            elif mode == "style":
+                j = find_close(data, i, "style")
+                out.append(paint_css(data[i:j]))
+            else:
+                j = data.find("<", i)
+                j = n if j == -1 else j
+                out.append(data[i:j])
+            i = j
+            continue
+        j = i + 1
+        quote = ""
+        while j < n:
+            if quote:
+                if data[j] == quote:
+                    quote = ""
+                elif data[j] == "\\":
+                    j += 1
+                j += 1
+                continue
+            if data[j] in "\"'":
+                quote = data[j]
+                j += 1
+                continue
+            if data[j] == ">":
+                j += 1
+                break
+            j += 1
+        tag = data[i:j]
+        name = tag_name(tag)
+        closing = tag.startswith("</")
+        out.append(paint_tag(tag))
+        if name in ("script", "style") and not closing and not tag.rstrip().endswith("/>"):
+            mode = name
+        elif closing and name == mode:
+            mode = ""
+        i = j
+    return "".join(out)
+
+
+def kind_of(text, ct):
+    if "json" in ct:
+        return "json"
+    if "html" in ct or "xml" in ct or ct.startswith("image/svg"):
+        return "markup"
+    if "javascript" in ct or ct.endswith("/js") or ct.endswith("+js"):
+        return "js"
+    if ct == "text/css":
+        return "css"
+    sample = text.lstrip()[:1]
+    if sample in "{[":
+        return "json"
+    if sample == "<":
+        return "markup"
+    return "plain"
+
+
+def paint(data, ct):
+    split = split_http(data)
+    if split is None:
+        body, prefix = data, ""
+    else:
+        header, sep, body = split
+        prefix = paint_headers(header) + sep
+    kind = kind_of(body, ct)
+    if kind == "json":
+        painted = paint_json(body)
+    elif kind == "markup":
+        painted = paint_markup(body)
+    elif kind == "js":
+        painted = paint_js(body)
+    elif kind == "css":
+        painted = paint_css(body)
+    else:
+        painted = body
+    return prefix + painted
+
+
+ct = os.environ.get("CONTENT_TYPE", "").split(";", 1)[0].strip().lower()
+raw = open(sys.argv[1], "rb").read()
+text = raw.decode("utf-8", "surrogateescape")
+sys.stdout.buffer.write(paint(text, ct).encode("utf-8", "surrogateescape"))
+TCURL_HL
+  then
+    cat -- "$tmp/body"
+    return
+  fi
+  cat -- "$tmp/paint"
+}
+
+body_is_text() {
+  local ct
+  if [[ ! -s "$tmp/body" ]]; then
+    return 1
+  fi
+  # A NUL makes grep treat the file as binary. An empty pattern would match
+  # everything, so detect that with -I instead of searching for NUL itself.
+  if ! LC_ALL=C grep -qI . "$tmp/body"; then
+    return 1
+  fi
+  ct=$(printf '%s' "$content_type" | tr '[:upper:]' '[:lower:]')
+  case "$ct" in
+    ""|text/*|application/json*|application/*xml*|application/javascript*|application/x-javascript*|application/*+json*|image/svg*)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+show_result() {
+  local view prompt page
+  view=$tmp/view
+  page=0
+
+  {
+    emit_identity
+    emit_outcome
+    if [[ -s "$tmp/body" ]] && body_is_text; then
+      printf '\n'
+      paint_body
+    elif [[ -s "$tmp/body" ]]; then
+      printf '\n'
+      printf 'response kept off the terminal (%s, %s). save it with -o file\n' \
+        "$(human_bytes "$size_download")" "${content_type:-unknown type}"
+    fi
+  } > "$view"
+
+  page=0
+  if [[ -s "$tmp/body" ]] && body_is_text && (( no_pager == 0 )) && [[ -t 1 ]] && command -v less >/dev/null 2>&1; then
+    page=1
+  fi
+
+  if (( page )); then
+    prompt='tcurl  line %lt-%lb of %L   space down   b up   q quit'
+    env LESS= LESSHISTFILE=/dev/null \
+      less --RAW-CONTROL-CHARS --quit-if-one-screen --no-init --tilde \
+        --prompt="$prompt" "$view" || true
+  elif [[ -t 1 ]]; then
+    cat -- "$view"
+  else
+    cat -- "$view" >&2
+  fi
+}
+
+main() {
+  local cmd wfmt us start_s stream
+
+  parse_args "$@"
+  init_colors
+
+  if (( url_count == 0 )); then
+    printf '%stcurl:%s missing url\n' "$red" "$rst" >&2
+    usage >&2
+    exit 2
+  fi
+  if (( url_count > 1 )); then
+    printf '%stcurl:%s pass one url\n' "$red" "$rst" >&2
+    exit 2
+  fi
+
+  command -v torsocks >/dev/null 2>&1 || die "torsocks is not installed"
+  command -v curl >/dev/null 2>&1 || die "curl is not installed"
+
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/tcurl.XXXXXX") || die "couldn't create a temp directory"
+  : > "$tmp/err"
+  : > "$tmp/body"
+
+  # One SOCKS identity for the check and the fetch, so both use one circuit.
+  TORSOCKS_USERNAME=$(printf 'tc%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM")
+  TORSOCKS_PASSWORD=$TORSOCKS_USERNAME
+  export TORSOCKS_USERNAME TORSOCKS_PASSWORD
+
+  progress " ${dim}looking up the tor exit...${rst}"
+  if ! fetch_exit; then
+    die "couldn't reach tor (is it listening on 127.0.0.1:9050?)" "$tmp/ip.err"
+  fi
+  style_exit
+
+  if [[ "$istor" == false ]]; then
+    progress_clear
+    emit_identity >&2
+    printf '  %s|%s %s%-7s%s %s%s%s\n' \
+      "$red" "$rst" "$dim" "error" "$rst" \
+      "$red" "tor check said this address is not on tor. request was not sent." "$rst" >&2
+    exit 1
+  fi
+
+  stream=0
+  if [[ ! -t 1 && -z "$user_out" && user_remote -eq 0 ]]; then
+    stream=1
+  fi
+
+  cmd=(curl --silent --show-error)
+  captured_body=0
+  if (( user_w == 0 )); then
+    us=$'\x1f'
+    wfmt="%output{${tmp}/meta}%{http_code}${us}%{time_total}${us}%{size_download}${us}%{content_type}${us}%{url_effective}${us}%{filename_effective}"$'\n'
+    cmd+=(-w "$wfmt")
+  fi
+  if (( user_dump == 0 )); then
+    cmd+=(-D "$tmp/hdr")
+  fi
+  if (( stream == 0 && user_remote == 0 )) && [[ -z "$user_out" ]]; then
+    cmd+=(-o "$tmp/body")
+    captured_body=1
+  fi
+  cmd+=("${curl_args[@]}")
+
+  if (( verbose || stream )); then
+    progress_clear
+    emit_identity >&2
+  else
+    progress " ${dim}exit${rst} ${bold}${ip}${rst}  ${dim}${tor_label}${rst}  ${dim}sending${rst}  ${url}"
+  fi
+
+  start_s=$SECONDS
+  rc=0
+  if (( stream )); then
+    if (( verbose )); then
+      torsocks "${cmd[@]}" || rc=$?
+    else
+      torsocks "${cmd[@]}" 2>"$tmp/err" || rc=$?
+    fi
+  else
+    if (( verbose )); then
+      user_w_out=$(torsocks "${cmd[@]}") || rc=$?
+    else
+      user_w_out=$(torsocks "${cmd[@]}" 2>"$tmp/err") || rc=$?
+    fi
+  fi
+  elapsed=$((SECONDS - start_s))
+  if (( verbose == 0 && stream == 0 )); then
+    progress_clear
+  fi
+  load_meta
+
+  if (( stream )); then
+    emit_outcome >&2
+    exit "$rc"
+  fi
+
+  show_result
+  exit "$rc"
+}
+
+trap cleanup EXIT
+trap on_int INT
+trap on_int TERM
+main "$@"

@@ -1,0 +1,3 @@
+# Required only for native mitmproxy flow dumps (.mitm / mitmdump -w).
+# HAR files, raw HTTP responses, HTML, JS, and JSON work with Python 3.10+ stdlib alone.
+mitmproxy>=10.0.0

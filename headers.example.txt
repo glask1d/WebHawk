@@ -1,0 +1,4 @@
+# One "Name: value" per line.
+Accept-Language: en-US,en;q=0.8
+X-Requested-With: WebHawk
+X-Forwarded-For: 127.0.0.1

@@ -1,0 +1,6 @@
+# WebHawk target list example
+# One host, IP, URL, or small CIDR per line. Comments start with #.
+
+127.0.0.1
+localhost
+# 10.0.0.0/30
