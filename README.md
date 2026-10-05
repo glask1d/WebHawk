@@ -22,6 +22,10 @@ python webhawk.py -l targets.txt --save-urls live.txt --save-source pages/
 python webhawk.py app.internal --ports 80,443 --intel --cors --md hawk.md
 ```
 
+## Preview
+![wh-1](https://github.com/user-attachments/assets/2e47e7f7-09ea-41a5-9eea-de8291f369ae)
+![wh-2](https://github.com/user-attachments/assets/589ca1d1-c900-45bc-b951-1edd73458340)
+
 ## Commands
 
 | Command | What it does |
@@ -153,11 +157,7 @@ Defaults stay small on purpose:
 - `--skip-tcp` on more than 1024 ports also requires `--authorized`
 - discover / mutate / params that explode past 400 paths require `--authorized`
 
-`--i-own-this` is still accepted as an alias for `--authorized`.
-
-
-## Preview
-![webhawk](images/webhawk.png)
+`--i-own-this` is still accepted as an alias for `--authorized`
 
 
 ## Install
