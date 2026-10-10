@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/d4e3b632-521f-4030-9a91-86a6192f7404" alt="WebHawk — HTTP / HTTPS attack-surface mapper" width="100%">
+  <img src="https://github.com/user-attachments/assets/86e527fb-6817-41c5-8d42-26f916021a09" alt="WebHawk — HTTP / HTTPS attack-surface mapper" width="100%">
 </p>
 
 # WebHawk
