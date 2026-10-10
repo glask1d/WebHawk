@@ -4,150 +4,271 @@
 
 # WebHawk
 
-**Version 2.7.0** — HTTP/HTTPS attack-surface mapper for **authorized** assessments.
+**Version 2.15.0** — an authorized HTTP toolkit. It maps hosts, keeps an engagement workspace, and runs the recon modules from one console.
 
-WebHawk finds ports that actually speak HTTP or HTTPS, fingerprints what is
-listening, and can write live URLs, page source, and a findings report to disk.
-It is meant for lab boxes, your own servers, and scoped engagements — not for
-scanning the internet.
+Use it on lab boxes, your own servers, and scoped engagements. What changed since the published 2.7.0 release is in [CHANGELOG.md](CHANGELOG.md).
 
-The default command is still that scan: `webhawk 127.0.0.1`. In a terminal,
-`webhawk` with no arguments opens a console where you load pulse, crt-scout,
-flowcarve, and the other modules. From a script, `webhawk pulse urls.txt`
-runs that module once and exits.
+Only run it against systems you own or have written permission to test.
+
+**Start here:** [Install](#install) · [Three ways to run it](#three-ways-to-run-it) · [Modules](#modules) · [Files on disk](#files-on-disk) · [Snare](#log-the-browser-with-snare) · [Console](#console) · [Scanner](#scanner)
+
+## Install
+
+Python 3.10 or newer.
 
 ```bash
-python webhawk.py 127.0.0.1 lab.local
-python webhawk.py -l targets.txt --save-urls live.txt --save-source pages/
-python webhawk.py app.internal --ports 80,443 --intel --cors --md hawk.md
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium        # only for scan --screenshots
+pip install -e .                   # optional: puts webhawk on PATH
+webhawk doctor
 ```
 
-## Preview
-![wh-1](https://github.com/user-attachments/assets/2e47e7f7-09ea-41a5-9eea-de8291f369ae)
-![wh-2](https://github.com/user-attachments/assets/589ca1d1-c900-45bc-b951-1edd73458340)
+`pip install -r requirements.txt` is the full set: rich, httpx, playwright, requests, urllib3, aiohttp, and colorama. `pip install -e .` alone installs rich and httpx and adds the `webhawk` command. Without that install, `python webhawk.py` from this directory does the same job.
 
-## Commands
+`webhawk doctor` reports Python, the packages, and whether `curl`, `torsocks`, and `tor` are present for tcurl. requests, urllib3, aiohttp, colorama, playwright, and mitmproxy are optional. The module that needs one will say so when it is missing.
 
-| Command | What it does |
-| --- | --- |
-| *(no arguments, in a terminal)* / `console` | Interactive console. `use` selects a module, `show options` lists its flags, `set` saves them, `run` executes it. |
-| *(default)* / `scan` | The HTTP/HTTPS mapper. Flags are listed by `webhawk scan --help`. |
-| `pulse`, `ct`, `carve`, `phish`, `ioc`, `chroma`, `urlscan`, `tcurl` | Run that module once and exit. `webhawk <module> --help` prints its flags. |
-| `scope`, `robots`, `repeater` | Built-in scope list, robots and sitemap URLs, and a request repeater. |
-| `modules` | Built-in commands, plus which module programs are on disk. |
-| `doctor` | Python version, required packages, optional packages, and the `curl` / `torsocks` / `tor` programs `tcurl` uses. |
-| `examples` | Copy-paste scans and shell-setup lines. |
-| `completion bash\|zsh` | Completion script. Write it to your shell's completion directory. |
-| `version` | Print the version. `--version` and `-V` do the same. |
-| `help` | This guide. `webhawk help scan` prints every scan flag. `webhawk help pulse` describes that module. |
+## Three ways to run it
 
-## Console
+A host or a scan flag still scans. A module name runs that module once. No arguments, in a terminal, opens the console.
 
-Opening `webhawk` in a terminal prints one of five ASCII banners and a short command list. Each start, and each `banner` command, picks a different one. `help` prints the rest.
-
-Tab completes the word at the cursor: commands, module names, option names, choices, and file paths. Up and down recall recent lines. History is kept in `~/.local/share/webhawk/history` (override with `WEBHAWK_HISTORY`). A line that contains a token, password, or secret is left out of that file. `search liveness` lists modules whose name or description matches.
-
-```text
+```bash
+webhawk 127.0.0.1 --ports 80,443
+webhawk silk http://127.0.0.1:8080/
 webhawk
-webhawk > use pulse
-webhawk pulse > show options
-webhawk pulse > set FILE urls.txt
-webhawk pulse > set FOLLOW_REDIRECTS true
-webhawk pulse > run
-webhawk pulse > back
-webhawk > use ct
-webhawk ct > run example.com -c -o live.txt
-webhawk ct > exit
 ```
 
-Option names are the argument destination in uppercase. Pulse's URL file is `FILE`. `set FILE=urls.txt` is the same as `set FILE urls.txt`. `true`, `yes`, `on`, and `1` turn a switch on. `unset FILE` forgets one value. `unset all` clears the module you have selected.
-
-Saved values stay on that module across `back` and later `use`. They fill whatever you leave off the next `run`. Arguments you type on `run` win, so `run other.txt` uses `other.txt` even when `FILE` is set. `run urls.txt --follow-redirects` still works on its own.
-
-`run --help` prints the selected module's flags. Typing the module name at the prompt runs it immediately: `pulse urls.txt`. `exit` leaves. Ctrl-C stops the module and returns to the prompt.
-
-`phish` and `chroma` have subcommands. `show options` lists them. `set COMMAND hunt` then `show options` lists that command's flags. `deep` and `download` stay available only after you select them.
-
-`tcurl` fetches a URL with curl through Tor:
+Inside the console the same module is `use`, then `run`:
 
 ```text
-webhawk tcurl > set URL example.com
-webhawk tcurl > set NO_PAGER true
-webhawk tcurl > run -I
+WebHawk > use silk
+WebHawk silk > run http://127.0.0.1:8080/
 ```
 
-Curl flags that take a value go in `EXTRA`, so the value stays with the flag:
+`webhawk help` is the command guide. `webhawk help scan` prints every scan flag. `webhawk <module> --help` prints that module's flags. `webhawk examples` prints copy-paste lines.
 
-```text
-webhawk tcurl > set EXTRA -A 'WebHawk' -H 'Accept: application/json'
-webhawk tcurl > run
-```
+A host whose name matches a command needs an explicit scan: `webhawk scan modules` or `webhawk -- pulse`. A positional argument that is an existing file is not scanned as a hostname. Put host lists on `-l`.
 
-`tcurl` needs `curl`, `torsocks`, and a Tor daemon on `127.0.0.1:9050`. `webhawk doctor` lists those three as optional.
+## Modules
 
-## Scope, robots, and repeater
+`webhawk modules` lists every module by group. `webhawk modules Enumerate` lists one group. Names stay flat: `use silk`, `webhawk silk`.
 
-`scope` is the allow-list for an engagement. It lives in `./.webhawk`, or in `$WEBHAWK_SCOPE` when that is set. Loopback is always allowed. Other hosts wait until you add them. A domain includes its subdomains. `*.example.com` is subdomains only. An address matches that address or a CIDR.
+### Workspace
+
+These keep the engagement. They share `./.webhawk` (or `$WEBHAWK_SCOPE`).
+
+| Module | What it does | Example |
+| --- | --- | --- |
+| `scope` | Allow-list and the shared URL list | `webhawk scope add app.internal` |
+| `session` | Store a Cookie or Authorization you already have | `webhawk session show` |
+| `roost` | Counts, scope entries, and hosts outside scope | `webhawk roost` |
+| `clutch` | List saved requests, or print one with secrets blanked | `webhawk clutch` |
+| `blaze` | Label a URL that is already in the list | `webhawk blaze add login https://app.internal/login` |
+| `quill` | Timestamped notes | `webhawk quill add checked the login form` |
+| `snare` | Localhost proxy. Stays up beside the console | `snare` |
+
+### Enumerate
+
+| Module | What it does | Example |
+| --- | --- | --- |
+| `scan` | Map HTTP and HTTPS on a host | `webhawk 127.0.0.1` |
+| `silk` | Spider one site, including robots and sitemaps | `webhawk silk http://127.0.0.1:8080/` |
+| `robots` | Turn a robots.txt or sitemap into URLs | `webhawk robots robots.txt --base https://app.internal` |
+| `forms` | List form fields and query parameters | `webhawk forms page.html --base https://app.internal` |
+| `vhost` | One address, once per Host name | `webhawk vhost http://127.0.0.1:8080/ app.internal` |
+| `cert` | Read the TLS certificate | `webhawk cert https://app.internal` |
+| `dns` | A, AAAA, CNAME, MX, TXT, and NS | `webhawk dns app.internal` |
+| `whois` | Registrar, dates, and nameservers | `webhawk whois app.internal` |
+| `mail` | MX, SPF, DMARC, and named DKIM selectors | `webhawk mail app.internal --selector s1` |
+| `redirect` | Follow a redirect chain and stop at the scope edge | `webhawk redirect http://127.0.0.1:8080/start` |
+| `pulse` | Check which URLs are live | `webhawk pulse .webhawk/urls.txt` |
+| `ct` | Certificate-transparency names (crt-scout) | `webhawk ct app.internal -c` |
+
+### Review
+
+| Module | What it does | Example |
+| --- | --- | --- |
+| `repeater` | Edit a saved request and send that copy | `webhawk repeater captured.http --print` |
+| `diff` | Compare two saved responses, or two in-scope URLs | `webhawk diff before.http after.http` |
+| `jwt` | Decode a token you already have | `webhawk jwt --session` |
+| `decode` | Print a page with non-image base64 shown as text | `webhawk decode http://127.0.0.1:8080/` |
+| `carve` | Pull links out of a HAR, raw HTTP, or a .mitm dump | `webhawk carve capture.har --unique` |
+| `tcurl` | Fetch through Tor | `webhawk tcurl example.com -I` |
+
+### Watch
+
+| Module | What it does | Example |
+| --- | --- | --- |
+| `phish` | Phishunt feed, campaigns, and a passive URL score | `webhawk phish --help` |
+| `ioc` | TweetFeed indicators (IOCaw) | `webhawk ioc --help` |
+| `chroma` | abuse.ch (chromahaus) | `webhawk chroma --help` |
+| `urlscan` | urlscan.io lookup | `webhawk urlscan --help` |
+
+`phish deep` and `chroma download` stay hidden until you set `COMMAND` to that subcommand.
+
+### Probe
+
+| Module | What it does | Example |
+| --- | --- | --- |
+| `skiff` | Replace `FUZZ` from a wordlist | `webhawk skiff -u http://127.0.0.1/FUZZ -w words.txt --dry-run` |
+
+## Files on disk
+
+Scope, URLs, and saved traffic live in `./.webhawk`. Set `WEBHAWK_SCOPE` to put that directory somewhere else.
+
+| Path | What it holds |
+| --- | --- |
+| `scope.txt` | Hosts, domains, `*.domains`, and CIDRs. Created by `scope init`. |
+| `urls.txt` | The shared URL list. |
+| `session.txt` | Cookie and Authorization. Hidden by roost. Blanked by clutch show. |
+| `requests/` | Raw requests. clutch lists these. repeater sends one. |
+| `responses/` | Responses from snare. diff reads these. |
+| `marks.txt` | blaze labels. |
+| `notes.txt` | quill notes. |
+| `snare/ca.crt` | CA certificate for the test browser. |
+
+Loopback is always allowed. Any other host needs a scope entry. A domain includes its subdomains. `*.example.com` is subdomains only. An address matches that address or a CIDR.
 
 ```bash
 webhawk scope init
 webhawk scope add app.internal '*.lab.internal' 10.1.0.0/16
-webhawk scope allow https://www.app.internal/admin
 webhawk scope import-urls found.txt
 webhawk scope urls
 ```
 
-`import-urls` keeps lines that already contain `://` and whose host is in scope. `urls` prints `.webhawk/urls.txt`. Point pulse at that file:
+`import-urls` keeps lines that contain `://` and whose host is in scope. `scope urls` prints the list. Point pulse at it with `webhawk pulse .webhawk/urls.txt`.
 
-```bash
-webhawk pulse .webhawk/urls.txt
+## Log the browser with snare
+
+Snare replaces the daily "point the browser at a local proxy and keep the traffic" workflow. From the console it stays up, and the prompt comes back:
+
+```text
+WebHawk > snare
+WebHawk [snare:8080] >
 ```
 
-`robots` reads a saved robots.txt or sitemap and prints one URL per line. Relative paths need `--base`. When a scope file exists, in-scope URLs are printed and new ones are appended to the URL list. `--no-workspace` prints every URL and leaves that list unchanged. `--fetch` requests one in-scope URL (loopback needs no scope entry) and follows a sitemap it names. A redirect onto a host outside scope is discarded. The URL list is stdout. The short summary is stderr, so this stays a clean list:
+Point the test browser at `127.0.0.1:8080`. Trust the certificate from `snare ca` so HTTPS inside scope can be read. That needs `openssl` on `PATH`.
 
 ```bash
-webhawk robots robots.txt sitemap.xml --base https://app.internal
-webhawk robots --fetch http://127.0.0.1:8080/robots.txt
+webhawk snare ca
 ```
 
-`repeater` loads a raw HTTP request, applies your edits, then sends that copy. `--print` writes the edited request and returns before any connection. The host that is contacted has to be in scope. `--connect` delivers the request to `HOST` or `HOST:PORT` and keeps the Host header. `--edit` opens `$VISUAL` or `$EDITOR` after the other edits. `--save-request NAME` stores that request under `.webhawk/requests/`.
+Each in-scope exchange is saved twice under one name:
+
+```text
+.webhawk/requests/example.com-snare-0001.http
+.webhawk/responses/example.com-snare-0001.http
+```
+
+The count starts over for each host, so a long list sorts by site. The live row ends with the file name. Tab on `clutch show` and `diff` fills that name in, so you do not type the directory:
+
+```text
+WebHawk > clutch
+WebHawk > clutch show example.com-snare-0001.http
+WebHawk > diff example.com-snare-0001.http example.com-snare-0002.http
+WebHawk > snare status
+WebHawk > snare stop
+```
+
+`clutch show` prints the request and replaces Cookie and Authorization with `[blank]`. The saved file still has them, so repeater can resend it. `diff` compares the two responses. A full path still works when the file is somewhere else.
+
+A host outside scope is forwarded and not written. With no scope file, only loopback is kept. A shell `webhawk snare` holds that terminal until Ctrl-C. Open the console when you want the proxy and the other modules together.
+
+A saved body over 1 MB is marked `truncated`. The browser still gets the full body, up to 8 MB.
+
+## Console
+
+`webhawk` in a terminal prints one of seven banners and a short command list. Four spell WEBHAWK. Three add a hawk. `banner` picks a different one. `help` prints the longer guide.
+
+```text
+WebHawk > use pulse
+WebHawk pulse > show options
+WebHawk pulse > set FILE urls.txt
+WebHawk pulse > set FOLLOW_REDIRECTS true
+WebHawk pulse > run
+WebHawk pulse > back
+WebHawk > exit
+```
+
+On a color terminal, WebHawk is magenta, the module name is cyan, and `>` is green. While snare is listening, `[snare:8080]` is yellow.
+
+Option names are the argument destination in uppercase. Pulse's URL file is `FILE`. `set FILE=urls.txt` is the same as `set FILE urls.txt`. `true`, `yes`, `on`, and `1` turn a switch on. `unset FILE` forgets one value. `unset all` clears the module you have selected.
+
+Saved values stay on that module across `back`. They fill whatever you leave off the next `run`. Arguments you type on `run` win. Typing the module name runs it once: `pulse urls.txt`. `run --help` prints that module's flags. Ctrl-C stops the module and returns to the prompt. `exit` leaves. If snare is up, `exit` stops it.
+
+Tab completes commands, modules, options, choices, group names, and paths, then leaves a space. A directory keeps its trailing slash so the path can continue. `diff` and `clutch show` offer the saved file names, so you do not type the directory. Up and down recall history. History is `~/.local/share/webhawk/history` (`WEBHAWK_HISTORY` overrides it). A line that contains a token, password, secret, cookie, API key, or JWT is left out.
+
+`search spider` lists modules whose name or description matches, and it names the group.
+
+`tcurl` needs `curl`, `torsocks`, and a Tor daemon on `127.0.0.1:9050`. Curl flags that take a value go in `EXTRA`:
+
+```text
+WebHawk tcurl > set URL example.com
+WebHawk tcurl > set EXTRA -A 'WebHawk' -H 'Accept: application/json'
+WebHawk tcurl > run -I
+```
+
+Shell completion, for the command name and scan flags:
 
 ```bash
-webhawk repeater captured.http --method POST --path /api/v2 --header 'X-Test: yes' --body '{"ok":true}' --print
-webhawk repeater captured.http --edit
-webhawk repeater captured.http --connect 127.0.0.1:8080
+webhawk completion bash > ~/.local/share/bash-completion/completions/webhawk
+webhawk completion zsh > ~/.zsh/completions/_webhawk
 ```
 
-The same tools from the shell:
+## Module notes
 
-```bash
-webhawk pulse urls.txt --follow-redirects
-webhawk ct example.com -c -o live.txt
-webhawk carve capture.har --unique
-webhawk tcurl --help
-webhawk scope init
-webhawk repeater captured.http --print
-```
+The newer modules print a small banner on a color terminal. `--plain` skips it. Pipes stay plain.
 
-`crt-scout` is `ct`. `flowcarve` is `carve`. `lanternjaw` is `phish`. `iocaw` is `ioc`. `chromahaus` is `chroma`.
+**scope.** `scope init` creates the directory and does not wipe an existing scope file.
 
-A host that is literally named like a command needs an explicit scan:
+**session.** `session set` writes `session.txt` and leaves scope off. silk, forms, vhost, redirect, diff, and decode send the saved Cookie and Authorization. A flag on one run replaces the saved value. An empty flag omits that header. Repeater does not add them.
 
-```bash
-webhawk scan modules
-webhawk -- pulse
-```
+**robots.** Relative paths need `--base`. With a scope file, in-scope URLs are appended to `urls.txt` unless you pass `--no-workspace`. `--fetch` requests one in-scope URL and follows a sitemap it names. A redirect onto a host outside scope is discarded. URLs go to stdout. The summary goes to stderr.
 
-pulse, ct, carve, phish, ioc, chroma, urlscan, and tcurl ship in `addons/` next to `webhawk.py`. WebHawk looks in `$WEBHAWK_ADDONS` first, then `./addons`, then `../addons`.
+**repeater.** `--print` writes the edited request and does not connect. The host that would be contacted has to be in scope, including `--connect`. `--edit` opens `$VISUAL` or `$EDITOR`. `--save-request NAME` stores the request under `requests/`.
 
-A positional argument that is an existing file is not scanned as a hostname. Put host lists on `-l`.
+**forms.** One normal GET, or a local file. It marks review names (`id`, `user`, `search`, `sort`, `order`, `filter`, and `*_id`) plus hidden, password, and disabled fields. Password values are blanked in anything it writes. `--save` writes raw requests for repeater. `--limit` defaults to 20. It does not send a modified request.
+
+**silk.** Stays on the scheme, host, and port you give it. Robots paths are listed and not fetched. Defaults are depth 2 and 40 fetches. Stdout is one URL per line.
+
+**vhost.** One connection, one GET per Host name. Names outside an active scope file are skipped. Redirects are left as they are.
+
+**cert.** One handshake. Subject, names, issuer, and dates.
+
+**redirect.** Stops before a hop that leaves the original hostname or scope.
+
+**diff.** A path that exists is read from disk. A bare name such as `example.com-snare-0001.http` is read from `responses/`. A URL is one GET, and only when that host is in scope.
+
+**dns.** Six queries, no name guessing. `--resolver` is an IP address. A CNAME with no address in the reply is marked for review.
+
+**whois.** One in-scope domain. `--server` is an IP and is the only server queried. Without it, WebHawk asks the IANA whois server for one referral and then queries that registry once.
+
+**jwt.** Prints the header and the claims. The signature is not checked. `--session` reads the saved Authorization value and strips a leading Bearer.
+
+**mail.** MX, SPF, `_dmarc`, and only the DKIM selectors you pass. It does not guess selectors and does not look up the mail hosts.
+
+**decode.** Image data and short unmarked blocks stay encoded. `--min` changes the 64-character floor.
+
+**roost.** Read-only. Secret values stay hidden.
+
+**clutch.** `show` takes the file name, not a path. Nothing is sent.
+
+**blaze.** The URL has to already be in `urls.txt`. A label is a short lowercase word. Writing marks does not turn scope on.
+
+**quill.** Each line starts with a UTC timestamp, `YYYY-MM-DD HH:MM:SSZ`.
+
+**snare.** Listens on `127.0.0.1`. In-scope traffic is decrypted and saved. Other hosts are forwarded and left out of the files. See [Log the browser with snare](#log-the-browser-with-snare).
+
+**skiff.** `--dry-run` prints the requests and does not connect. It needs requests, urllib3, and colorama.
+
+Alias names: `crt-scout` is `ct`, `flowcarve` is `carve`, `lanternjaw` is `phish`, `iocaw` is `ioc`, `chromahaus` is `chroma`. The programs ship in `addons/` next to `webhawk.py`. WebHawk looks in `$WEBHAWK_ADDONS` first, then `./addons`, then `../addons`.
 
 ## Rules of engagement
 
-Only run WebHawk against systems you own or have **written permission** to
-test. Unauthorized port scanning and web probing can be illegal.
+Only run WebHawk against systems you own or have **written permission** to test. Unauthorized port scanning and web probing can be illegal.
 
-Defaults stay small on purpose:
+Scan defaults stay small on purpose:
 
 - common web ports only (80, 443, 8080, 8443, …)
 - no full 1–65535 sweep unless you pass `--all --authorized`
@@ -157,62 +278,27 @@ Defaults stay small on purpose:
 - `--skip-tcp` on more than 1024 ports also requires `--authorized`
 - discover / mutate / params that explode past 400 paths require `--authorized`
 
-`--i-own-this` is still accepted as an alias for `--authorized`
-
-
-## Install
-
-Python 3.10+ recommended.
-
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-playwright install chromium        # needed for --screenshots
-chmod +x webhawk.py
-python webhawk.py doctor
-python webhawk.py --version
-```
-
-Editable install, optional. This puts a `webhawk` command on `PATH`:
-
-```bash
-pip install -e .
-```
-
-`requirements.txt` currently includes:
-
-- `rich`
-- `httpx`
-- `playwright`
-- `requests` (phish and ioc)
-- `aiohttp` (ct)
-
-Install on PATH:
-
-```bash
-chmod +x ~/tools/webhawk/webhawk.py
-sudo ln -sf ~/tools/webhawk/webhawk.py /usr/local/bin/webhawk
-```
+`--i-own-this` is still accepted as an alias for `--authorized`.
 
 ## Project files
 
 | File | Purpose |
 | --- | --- |
-| `webhawk.py` | Scanner, and the `webhawk` entry point |
-| `hawk/` | Command shell: router, console, module options, loader, `doctor`, completion, and scope, robots, and repeater |
-| `addons/` | pulse, crt-scout, flowcarve, Lanternjaw, IOCaw, chromahaus, urlscan, and tcurl |
+| `webhawk.py` | Scanner, and the `webhawk` entry point when it is not installed |
+| `hawk/` | Console, module loader, scope, session, and the built-in modules |
+| `addons/` | pulse, crt-scout, flowcarve, Lanternjaw, IOCaw, chromahaus, urlscan, tcurl, and skiff |
+| `CHANGELOG.md` | Everything new since 2.7.0 |
 | `requirements.txt` | Python dependencies |
 | `pyproject.toml` | Optional `pip install -e .` metadata |
-| `images/wh-banner.jpg` | README header art |
-| `images/webhawk.png` | Preview image |
 | `targets.example.txt` | Sample host list |
 | `agents.example.txt` | Sample User-Agent list |
 | `paths.example.txt` | Sample path list |
 | `headers.example.txt` | Sample custom headers |
 | `http_port_probe.py` | Compatibility wrapper. Always a scan, never the shell |
 
-## Quick start
+## Scanner
+
+The rest of this file is the HTTP/HTTPS mapper. `webhawk 127.0.0.1` runs it. `webhawk scan --help` prints the same flags. Closed ports never get an HTTP request unless you pass `--skip-tcp`.
 
 ```bash
 webhawk doctor
@@ -231,8 +317,6 @@ webhawk 127.0.0.1 --ports 80,443 --delay 0.3-1.0 --intel --md report.md
 5. On HTTPS, pull TLS version, subject, issuer, and expiry.
 6. Optional intel: artifacts, params, headers, cookies, `security.txt`, favicon, JS, DNS, CT, banners.
 7. Stream artifacts to disk and optionally write JSON / CSV / Markdown.
-
-Closed ports never get an HTTP request unless you pass `--skip-tcp`.
 
 ## Features
 
@@ -478,7 +562,7 @@ admin
 `agents.txt`
 
 ```
-WebHawk/2.7.0 (coffee-powered)
+WebHawk/2.15.0 (coffee-powered)
 Mozilla/4.0 (PSP (PlayStation Portable); 2.00)
 ```
 

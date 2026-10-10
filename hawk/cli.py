@@ -29,6 +29,7 @@ from hawk.catalog import (
     BUILTIN_SUMMARIES,
     REFERENCES,
     addon_roots,
+    group_names,
     locate_script,
     reference_canonical,
     tool_by_command,
@@ -144,7 +145,10 @@ def print_overview(*, usage_error: bool) -> int:
         "  [info]webhawk 127.0.0.1 --ports 80,443 --intel[/info]\n"
         "  [info]webhawk pulse urls.txt[/info]\n"
         "  [info]webhawk scope init[/info]\n"
-        "  [info]webhawk repeater request.txt --print[/info]"
+        "  [info]webhawk repeater request.txt --print[/info]\n"
+        "  [info]webhawk forms page.html --base http://127.0.0.1[/info]\n"
+        "  [info]webhawk silk http://127.0.0.1/[/info]\n"
+        "  [info]webhawk vhost http://127.0.0.1/ app.internal[/info]"
     )
     table = Table(header_style="brand", show_lines=False, box=None, pad_edge=False)
     table.add_column("Command", style="info")
@@ -196,11 +200,33 @@ def print_examples() -> int:
         "[info]# the same module as one command[/info]\n"
         "webhawk pulse urls.txt\n"
         "webhawk ct example.com -c -o live.txt\n"
-        "webhawk tcurl --help\n\n"
-        "[info]# scope, robots, and repeater[/info]\n"
+        "webhawk tcurl --help\n"
+        "webhawk skiff -u http://127.0.0.1/FUZZ -w words.txt --dry-run\n\n"
+        "[info]# scope, session, and the built-in recon modules[/info]\n"
         "webhawk scope init\n"
         "webhawk scope add app.internal\n"
+        "webhawk session set cookie 'session=abc'\n"
         "webhawk robots robots.txt --base https://app.internal\n"
+        "webhawk forms page.html --base https://app.internal\n"
+        "webhawk silk http://127.0.0.1/\n"
+        "webhawk vhost http://127.0.0.1/ app.internal\n"
+        "webhawk cert app.internal\n"
+        "webhawk redirect http://127.0.0.1/\n"
+        "webhawk diff before.http after.http\n"
+        "webhawk dns app.internal\n"
+        "webhawk whois app.internal\n"
+        "webhawk jwt --session\n"
+        "webhawk mail app.internal --selector s1\n"
+        "webhawk decode http://127.0.0.1/\n"
+        "webhawk roost\n"
+        "webhawk clutch\n"
+        "webhawk blaze add login https://app.internal/login\n"
+        "webhawk quill add checked the login form\n"
+        "webhawk snare\n"
+        "webhawk snare status\n"
+        "webhawk clutch show example.com-snare-0001.http\n"
+        "webhawk diff example.com-snare-0001.http example.com-snare-0002.http\n"
+        "webhawk snare ca\n"
         "webhawk repeater request.txt --method POST --path /api --print\n\n"
         "[info]# shell setup[/info]\n"
         "webhawk doctor\n"
@@ -211,22 +237,13 @@ def print_examples() -> int:
     return 0
 
 
-def print_modules(tool_file: Path) -> int:
-    from rich.table import Table
+def print_modules(tool_file: Path, group: str | None = None) -> int:
+    from hawk.console import print_loadable
 
-    table = Table(title="commands", header_style="brand")
-    table.add_column("Command", style="info")
-    table.add_column("State")
-    table.add_column("What it does")
-    for name in ("scan", "console", "modules", "doctor", "examples", "completion", "version", "help"):
-        table.add_row(name, "[ok]built-in[/ok]", BUILTIN_SUMMARIES[name])
-    for name, summary in MODULES.items():
-        table.add_row(name, "[ok]built-in[/ok]", summary)
-    for tool in REFERENCES:
-        script = locate_script(tool, tool_file)
-        state = "[ok]module[/ok]" if script else "[muted]not on disk[/muted]"
-        table.add_row(tool.command, state, tool.summary)
-    ui.console.print(table)
+    if not print_loadable(tool_file, group, guide=False):
+        return 2
+    if group:
+        return 0
 
     ui.console.print(
         "\n[info]Console[/info]\n"
@@ -239,7 +256,11 @@ def print_modules(tool_file: Path) -> int:
         "  webhawk pulse urls.txt\n"
         "  webhawk ct example.com -c\n"
         "  webhawk scope add app.internal\n"
-        "  webhawk repeater request.txt --print"
+        "  webhawk repeater request.txt --print\n"
+        "  webhawk forms --url http://127.0.0.1/\n"
+        "  webhawk silk http://127.0.0.1/\n"
+        "  webhawk vhost http://127.0.0.1/ app.internal\n"
+        "  webhawk dns app.internal"
     )
     ui.console.print("\n[muted]Module search path[/muted] (first hit wins; override with WEBHAWK_ADDONS)")
     for root in addon_roots(tool_file):
@@ -335,10 +356,14 @@ def command_blurb(command: str) -> str:
             "  set FILE urls.txt\n"
             "  run\n"
             "  exit\n\n"
-            "Tab completes commands, modules, and option names.\n"
+            "Tab completes a word and leaves a space. A directory keeps its trailing slash.\n"
             "webhawk console does the same when you want the prompt from a script or a pipe."
         ),
-        "modules": "List built-in commands and reference modules.\n\n  webhawk modules",
+        "modules": (
+            "List modules by group.\n\n"
+            "  webhawk modules\n"
+            "  webhawk modules Enumerate"
+        ),
         "doctor": "Check Python, required packages, and optional ones used by screenshots and reference tools.\n\n  webhawk doctor",
         "examples": "Print copy-paste scans.\n\n  webhawk examples",
         "completion": "Print a completion script.\n\n  webhawk completion bash\n  webhawk completion zsh",
@@ -359,16 +384,18 @@ def print_completion(shell: str, build_parser: BuildParser) -> int:
     for tool in REFERENCES:
         commands.extend(tool.aliases)
     flags = _scan_flag_names(build_parser)
+    groups = group_names()
     if shell == "bash":
-        sys.stdout.write(_bash_script(commands, flags))
+        sys.stdout.write(_bash_script(commands, flags, groups))
     else:
-        sys.stdout.write(_zsh_script(commands, flags))
+        sys.stdout.write(_zsh_script(commands, flags, groups))
     return 0
 
 
-def _bash_script(commands: list[str], flags: list[str]) -> str:
+def _bash_script(commands: list[str], flags: list[str], groups: list[str]) -> str:
     command_words = " ".join(commands)
     flag_words = " ".join(flags)
+    group_words = " ".join(groups)
     return f"""# WebHawk {VERSION} bash completion.
 # Save it where bash-completion will load it, for example:
 #   webhawk completion bash > ~/.local/share/bash-completion/completions/webhawk
@@ -379,8 +406,13 @@ _webhawk_complete() {{
   prev="${{COMP_WORDS[COMP_CWORD-1]}}"
   local commands="{command_words}"
   local flags="{flag_words}"
+  local groups="{group_words}"
   if [[ "$COMP_CWORD" -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    return 0
+  fi
+  if [[ "${{COMP_WORDS[1]}}" == "modules" || "${{COMP_WORDS[1]}}" == "commands" ]]; then
+    COMPREPLY=( $(compgen -W "$groups" -- "$cur") )
     return 0
   fi
   if [[ "${{COMP_WORDS[1]}}" == "completion" ]]; then
@@ -396,11 +428,12 @@ complete -F _webhawk_complete webhawk.py
 """
 
 
-def _zsh_script(commands: list[str], flags: list[str]) -> str:
+def _zsh_script(commands: list[str], flags: list[str], groups: list[str]) -> str:
     # The file body is the completion function. compinit autoloads a file
     # named `_webhawk`, so this must not wrap itself in another function.
     described = "\n  ".join(f"'{name}'" for name in commands)
     flag_words = " ".join(flags)
+    group_words = " ".join(groups)
     return f"""#compdef webhawk webhawk.py
 # WebHawk {VERSION} zsh completion.
 # Put this file on fpath after `compinit`:
@@ -411,6 +444,12 @@ commands=(
 )
 if (( CURRENT == 2 )); then
   _describe 'command' commands
+  return
+fi
+if [[ ${{words[2]}} == modules || ${{words[2]}} == commands ]]; then
+  local -a groups
+  groups=( {group_words} )
+  _values 'group' $groups
   return
 fi
 if [[ ${{words[2]}} == completion ]]; then
@@ -489,7 +528,10 @@ def dispatch(
         if chosen.args and chosen.args[0] in ("-h", "--help"):
             ui.console.print(command_blurb("modules"))
             return 0
-        return print_modules(tool_file)
+        if len(chosen.args) > 1:
+            ui.console.print("[info]webhawk modules[/info] takes one group name.")
+            return 2
+        return print_modules(tool_file, chosen.args[0] if chosen.args else None)
     if chosen.command == "doctor":
         if chosen.args and chosen.args[0] in ("-h", "--help"):
             ui.console.print(command_blurb("doctor"))

@@ -76,7 +76,72 @@ REFERENCES: tuple[ReferenceTool, ...] = (
         "tcurl",
         "tcurl",
     ),
+    ReferenceTool(
+        "skiff",
+        "HTTP fuzzer. Replace FUZZ with words from a wordlist.",
+        "skiff",
+        "skiff.py",
+    ),
 )
+
+# Display order for `show modules`. Names stay flat: `use silk` is unchanged.
+MODULE_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Workspace", ("scope", "session", "roost", "clutch", "blaze", "quill", "snare")),
+    (
+        "Enumerate",
+        (
+            "scan",
+            "silk",
+            "robots",
+            "forms",
+            "vhost",
+            "cert",
+            "dns",
+            "whois",
+            "mail",
+            "redirect",
+            "pulse",
+            "ct",
+        ),
+    ),
+    ("Review", ("repeater", "diff", "jwt", "decode", "carve", "tcurl")),
+    ("Watch", ("phish", "ioc", "chroma", "urlscan")),
+    ("Probe", ("skiff",)),
+)
+
+
+def group_names() -> list[str]:
+    return [title for title, _members in MODULE_GROUPS]
+
+
+def match_group(token: str) -> str | None:
+    """Return the group title for a name, ignoring case."""
+    folded = token.strip().lower()
+    for title, _members in MODULE_GROUPS:
+        if title.lower() == folded:
+            return title
+    return None
+
+
+def group_for(name: str) -> str | None:
+    for title, members in MODULE_GROUPS:
+        if name in members:
+            return title
+    return None
+
+
+def _require_group_coverage() -> None:
+    seen: list[str] = []
+    for _title, members in MODULE_GROUPS:
+        seen.extend(members)
+    expected = {"scan", *MODULES, *(tool.command for tool in REFERENCES)}
+    if len(seen) != len(set(seen)) or set(seen) != expected:
+        missing = sorted(expected.difference(seen))
+        extra = sorted(set(seen).difference(expected))
+        raise RuntimeError(f"module groups drifted: missing {missing} extra {extra}")
+
+
+_require_group_coverage()
 
 # First argument tokens that must not be treated as scan targets.
 # A host with one of these names is scanned with `webhawk scan <name>`
@@ -96,7 +161,7 @@ BUILTIN_COMMANDS = (
 BUILTIN_SUMMARIES = {
     "scan": "Map HTTP/HTTPS attack surface. This runs when the first argument is a target or a flag.",
     "console": "Open the interactive console. A terminal with no arguments does this too.",
-    "modules": "List commands, and show which reference modules are on disk.",
+    "modules": "List modules by group. A group name lists that group only.",
     "doctor": "Check the Python version and installed dependencies.",
     "examples": "Print copy-paste scans and shell-setup lines.",
     "completion": "Print a bash or zsh completion script.",

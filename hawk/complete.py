@@ -12,10 +12,11 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from hawk.catalog import REFERENCES, reference_canonical
+from hawk.catalog import REFERENCES, group_names, reference_canonical
 from hawk.modules import MODULES
 from hawk.options import SpecError, load_spec
 from hawk.options import _active_command, _command_from_argv, _find, _visible
+from hawk.workspace import requests_dir, responses_dir
 
 CONSOLE_COMMANDS = (
     "help",
@@ -37,7 +38,10 @@ CONSOLE_COMMANDS = (
 )
 
 _FILE_NAMES = {"FILE", "INPUTS", "SAVE", "OUTPUT", "WORDLIST", "REQUEST"}
-_SENSITIVE = re.compile(r"(token|password|secret|api[_-]?key|authorization)", re.IGNORECASE)
+_SENSITIVE = re.compile(
+    r"(token|password|secret|api[_-]?key|authorization|cookie|eyJ)",
+    re.IGNORECASE,
+)
 _HISTORY_LIMIT = 1000
 
 
@@ -134,6 +138,10 @@ def complete_line(prefix: str, word: str, state: CompleteState) -> list[str]:
         return _filter(word, module_names())
     if head == "show" and len(before) == 1:
         return _filter(word, ["modules", "options"])
+    if head == "show" and len(before) == 2 and before[1].lower() in ("modules", "module"):
+        return _filter(word, group_names())
+    if head in ("modules", "commands") and len(before) == 1:
+        return _filter(word, group_names())
     if head == "search" and len(before) == 1:
         return _filter(word, module_names())
     if head == "set":
@@ -146,6 +154,17 @@ def complete_line(prefix: str, word: str, state: CompleteState) -> list[str]:
     if module and len(before) >= 1:
         return _complete_args(module, before[1:], word, state)
     return []
+
+
+def presented_match(match: str, only: bool) -> str:
+    """Add a trailing space when this is the only completion and the word is finished.
+
+    A directory match ends in `/` and stays without a space, so the next Tab
+    can continue the path. This readline build has no completion-append-character.
+    """
+    if only and match and not match.endswith("/"):
+        return match + " "
+    return match
 
 
 def install_reader(state: CompleteState) -> Callable[[str], str] | None:
@@ -167,7 +186,7 @@ def install_reader(state: CompleteState) -> Callable[[str], str] | None:
                 beg = readline.get_begidx()
                 matches = complete_line(buf[:beg], text, state)
             if index < len(matches):
-                return matches[index]
+                return presented_match(matches[index], len(matches) == 1)
         except Exception:
             return None
         return None
@@ -276,7 +295,13 @@ def _complete_args(module: str | None, argv: list[str], word: str, state: Comple
         matched = _filter(word, names)
         if matched:
             return matched
-    if word.startswith("-") or word == "":
+    if word.startswith("-"):
+        return _flag_names(spec, command, word)
+    if not _explicit_path(word):
+        saved = _saved_names(module, command, word)
+        if saved:
+            return saved
+    if word == "":
         return _flag_names(spec, command, word)
     return path_completions(word)
 
@@ -306,6 +331,24 @@ def _values_for(opt, word: str) -> list[str]:
     if _wants_path(opt, word):
         return path_completions(word)
     return []
+
+
+def _explicit_path(word: str) -> bool:
+    return word.startswith(("/", "~", "./", "../")) or "/" in word
+
+
+def _saved_names(module: str | None, command: str | None, word: str) -> list[str]:
+    """Basenames from responses/ or requests/. Empty when this argument is not one of those."""
+    if module == "diff":
+        folder = responses_dir()
+    elif module == "clutch" and command == "show":
+        folder = requests_dir()
+    else:
+        return []
+    if not folder.is_dir():
+        return []
+    names = [path.name for path in folder.iterdir() if path.is_file() and not path.name.startswith(".")]
+    return _filter(word, names)
 
 
 def _wants_path(opt, word: str) -> bool:

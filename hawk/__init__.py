@@ -6,6 +6,6 @@ flag never comes through here as a new subcommand: those arguments keep
 running a scan.
 """
 
-VERSION = "2.7.0"
+VERSION = "2.15.0"
 
 __all__ = ["VERSION"]

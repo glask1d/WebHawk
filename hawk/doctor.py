@@ -45,6 +45,8 @@ def collect_checks(tool_file) -> list[Check]:
         ("playwright", False),
         ("aiohttp", False),
         ("requests", False),
+        ("urllib3", False),
+        ("colorama", False),
         ("mitmproxy", False),
     ):
         found = _dist_version(dist)

@@ -1,0 +1,4 @@
+# Skiff runtime dependencies.
+requests==2.32.3
+colorama==0.4.6
+urllib3==2.3.0

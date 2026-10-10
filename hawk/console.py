@@ -7,8 +7,10 @@ module name runs it once and returns to the prompt.
 
 from __future__ import annotations
 
+import os
 import random
 import shlex
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -16,7 +18,16 @@ from rich.markup import escape
 from rich.table import Table
 
 from hawk import VERSION, ui
-from hawk.catalog import REFERENCES, locate_script, reference_canonical
+from hawk.catalog import (
+    MODULE_GROUPS,
+    REFERENCES,
+    group_for,
+    group_names,
+    locate_script,
+    match_group,
+    reference_canonical,
+    tool_by_command,
+)
 from hawk.modules import MODULES
 from hawk.complete import (
     CompleteState,
@@ -34,7 +45,8 @@ ReadLine = Callable[[str], str]
 Runner = Callable[..., int]
 Prepare = Callable[..., list[str]]
 
-# Startup art. Each one spells WEBHAWK. print_banner picks a new one every call.
+# Startup art. print_banner picks a new one every call.
+# Four are lettering. Three put a hawk beside the name.
 BANNERS = (
     r"""
 W   W EEEEE BBBB  H   H  AAA  W   W K   K
@@ -61,11 +73,57 @@ WW  WW EEEE   BBBBB  HHHHHH AAAAAA WW  WW KK KK
 W    W EEEEEE BB  BB HH  HH AA  AA W    W KK  KK
 """.strip("\n"),
     r"""
-W   W EEEEE BBBB  H   H  AAA  W   W K   K        
-  W   W E     B   B H   H A   A W   W K  K       
-    W W W EEE   BBBB  HHHHH AAAAA W W W KKK      
-      W W W E     B   B H   H A   A W W W K  K   
-         W W  EEEEE BBBB  H   H A   A  W W  K   K
+            ___
+         .-'   `-.
+       .'         '.
+      /    ___      \
+     |    /   \      )   W   W EEEEE BBBB  H   H  AAA  W   W K   K
+     |   |  o  )     )   W   W E     B   B H   H A   A W   W K  K
+      \   \  <'     /    W W W EEE   BBBB  HHHHH AAAAA W W W KKK
+       '.  '---'  .'     W W W E     B   B H   H A   A W W W K  K
+         '-.____.-'       W W  EEEEE BBBB  H   H A   A  W W  K   K
+            ||||
+        ____||||____
+       [____________]
+""".strip("\n"),
+    r"""
+       \\
+        \\
+         \\
+          \\___
+       .-'     `-.
+     .'            '.
+    /     ___        \
+   |     /   \        )
+   |    |  o  )       )   W   W EEEEE BBBB  H   H  AAA  W   W K   K
+    \    \  <'       /    W   W E     B   B H   H A   A W   W K  K
+     '.   '---'    .'     W W W EEE   BBBB  HHHHH AAAAA W W W KKK
+       '-.______.-'       W W W E     B   B H   H A   A W W W K  K
+           ||||            W W  EEEEE BBBB  H   H A   A  W W  K   K
+       ____||||____
+      [____________]
+""".strip("\n"),
+    r"""
+                         ___
+                      .-'   `-.
+                    .'         '.
+    ________________.           .________________
+  .'                |    ___    |                '.
+ /                  |   /   \   |                  \
+|                   |  |  o  )  |                   |
+ \                  |   \  <'   |                  /
+  '.                '.  '---'  .'                .'
+    '----------.      '-.____.-'      .----------'
+                '--------.    .--------'
+                         ||||
+                      ___||||___
+                     [__________]
+
+      W   W EEEEE BBBB  H   H  AAA  W   W K   K
+      W   W E     B   B H   H A   A W   W K  K
+      W W W EEE   BBBB  HHHHH AAAAA W W W KKK
+      W W W E     B   B H   H A   A W W W K  K
+       W W  EEEEE BBBB  H   H A   A  W W  K   K
 """.strip("\n"),
 )
 
@@ -78,25 +136,73 @@ def canonical_module(token: str) -> str | None:
     return reference_canonical(token)
 
 
-def print_loadable(tool_file: Path) -> None:
-    table = Table(title="modules", header_style="brand", box=None, pad_edge=False)
-    table.add_column("Module", style="info")
-    table.add_column("State")
-    table.add_column("What it does")
-    table.add_row("scan", "[ok]ready[/ok]", "Map HTTP/HTTPS attack surface.")
-    for name, summary in MODULES.items():
-        table.add_row(name, "[ok]ready[/ok]", summary)
-    for tool in REFERENCES:
-        ready = locate_script(tool, tool_file) is not None
-        state = "[ok]ready[/ok]" if ready else "[muted]not on disk[/muted]"
-        label = tool.command
-        if tool.aliases:
-            label = f"{tool.command} ({', '.join(tool.aliases)})"
-        table.add_row(label, state, tool.summary)
-    ui.console.print(table)
-    ui.console.print("\n[info]use[/info] <module> selects one. [info]run[/info] <args> executes it.")
-    ui.console.print("A module name also runs immediately: [info]pulse urls.txt[/info]")
-    ui.console.print("[info]search[/info] <word> finds a module by name or description.")
+def print_loadable(tool_file: Path, group: str | None = None, *, guide: bool = True) -> bool:
+    """Print modules by group. A group name prints that group only."""
+    chosen = None
+    if group is not None:
+        chosen = match_group(group)
+        if chosen is None:
+            _unknown_group(group)
+            return False
+    started = False
+    for title, members in MODULE_GROUPS:
+        if chosen and title != chosen:
+            continue
+        if started:
+            ui.console.print()
+        started = True
+        ui.console.print(f"[brand]{title}[/brand]")
+        ui.console.print(_group_table(members, tool_file))
+    if guide and chosen is None:
+        ui.console.print(
+            "\n[info]show modules[/info] <group> lists one group. "
+            "[info]use[/info] <module> selects one. [info]run[/info] <args> executes it."
+        )
+        ui.console.print("A module name also runs immediately: [info]pulse urls.txt[/info]")
+        ui.console.print("[info]search[/info] <word> finds a module by name or description.")
+    return True
+
+
+def _group_table(members: tuple[str, ...], tool_file: Path) -> Table:
+    table = Table(box=None, show_header=False, pad_edge=False, padding=(0, 2), expand=False)
+    table.add_column(style="info", no_wrap=True, min_width=len("  redirect"))
+    table.add_column(overflow="fold")
+    for name in members:
+        summary, aliases, reference = _module_facts(name)
+        detail = escape(summary)
+        notes: list[str] = []
+        if aliases:
+            notes.extend(aliases)
+        if reference:
+            tool = tool_by_command(name)
+            if tool is not None and locate_script(tool, tool_file) is None:
+                notes.append("not on disk")
+        if notes:
+            detail += "  [muted]" + escape("  ".join(notes)) + "[/muted]"
+        table.add_row(f"  {name}", detail)
+    return table
+
+
+def _module_facts(name: str) -> tuple[str, tuple[str, ...], bool]:
+    if name == "scan":
+        return "Map HTTP/HTTPS attack surface.", (), False
+    if name in MODULES:
+        return MODULES[name], (), False
+    tool = tool_by_command(name)
+    if tool is None:
+        return "", (), False
+    return tool.summary, tool.aliases, True
+
+
+def _unknown_group(token: str) -> None:
+    text = token.strip()
+    home = group_for(text) or group_for(reference_canonical(text) or "")
+    if home:
+        ui.console.print(f"[info]{escape(text)}[/info] is in [brand]{home}[/brand].")
+        ui.console.print(f"[info]show modules {home}[/info]")
+        return
+    ui.console.print(f"No group named [warn]{escape(text)}[/warn].")
+    ui.console.print("  " + "   ".join(f"[brand]{title}[/brand]" for title in group_names()))
 
 
 def choose_banner() -> str:
@@ -121,15 +227,15 @@ def print_banner() -> None:
         "[info]show modules[/info]    what you can load\n"
         "[info]use[/info] <module>    select one, then [info]show options[/info]\n"
         "[info]set[/info] NAME VALUE  save a flag, then [info]run[/info]\n"
-        "[info]exit[/info]            leave the console\n"
-        "[info]Tab[/info]             completes commands, modules, and options"
+        "[info]snare[/info]           proxy that stays up. [info]clutch[/info] lists what it saved\n"
+        "[info]exit[/info]            leave the console"
     )
 
 
 def print_console_help(active: str | None) -> None:
     ui.console.print(
         "[info]help[/info]            this guide\n"
-        "[info]show modules[/info]    list modules\n"
+        "[info]show modules[/info]    list modules by group, or one group by name\n"
         "[info]use[/info] <module>    select a module\n"
         "[info]show options[/info]    flags for the selected module\n"
         "[info]set[/info] NAME VALUE  save a flag for later runs ([info]set[/info] NAME=VALUE works too)\n"
@@ -142,13 +248,26 @@ def print_console_help(active: str | None) -> None:
         "[info]doctor[/info]          check Python and packages\n"
         "[info]version[/info]         print the WebHawk version\n"
         "[info]exit[/info]            leave the console\n"
-        "\n[info]Tab[/info] completes commands, modules, option names, and paths.\n"
+        "\n[info]Tab[/info] completes commands, modules, option names, and paths, then leaves a space.\n"
+        "A directory keeps its trailing slash so the path can continue.\n"
         "Up and down recall history in a terminal.\n"
         "\nThe same module from the shell, without the prompt:\n"
         "  webhawk pulse urls.txt --follow-redirects\n"
         "  webhawk ct example.com -c\n"
         "  webhawk tcurl example.com -I\n"
-        "  webhawk repeater captured.http --print"
+        "  webhawk repeater captured.http --print\n"
+        "  webhawk forms page.html --base http://127.0.0.1\n"
+        "  webhawk silk http://127.0.0.1/\n"
+        "  webhawk vhost http://127.0.0.1/ app.internal\n"
+        "  webhawk session show\n"
+        "  webhawk snare\n"
+        "  webhawk clutch show example.com-snare-0001.http\n"
+        "  webhawk diff example.com-snare-0001.http example.com-snare-0002.http\n"
+        "\n[info]snare[/info] listens and returns to this prompt. "
+        "[info]snare stop[/info] closes it. "
+        "[info]snare status[/info] prints the port and the file names. "
+        "[info]clutch[/info] lists saved requests. "
+        "Tab on [info]diff[/info] and [info]clutch show[/info] fills in the saved file name."
     )
     if active:
         ui.console.print(
@@ -178,7 +297,8 @@ def print_module_search(query: str) -> None:
         ui.console.print("[info]show modules[/info] lists all of them.")
         return
     for name, summary in rows:
-        ui.console.print(f"[info]{name}[/info]  {summary}")
+        home = group_for(name) or ""
+        ui.console.print(f"[info]{name}[/info]  [muted]{home}[/muted]  {summary}")
 
 
 def print_history(lines: list[str]) -> None:
@@ -192,9 +312,42 @@ def print_history(lines: list[str]) -> None:
 
 
 def _prompt(active: str | None) -> str:
+    """Console prompt. WebHawk and the module name use different colors on a tty."""
+    from hawk.modules.snare import job_tag
+
+    tag = job_tag()
+    job = f"[{tag}] " if tag else ""
     if active:
-        return f"webhawk {active} > "
-    return "webhawk > "
+        plain = f"WebHawk {active} {job}> "
+    else:
+        plain = f"WebHawk {job}> "
+    if not _prompt_color():
+        return plain
+    # \001 and \002 tell readline the color codes take no columns.
+    brand = "\001\033[1;95m\002"
+    module = "\001\033[1;96m\002"
+    mark = "\001\033[1;32m\002"
+    job_color = "\001\033[1;93m\002"
+    reset = "\001\033[0m\002"
+    job_bit = f"{job_color}[{tag}]{reset} " if tag else ""
+    if active:
+        return f"{brand}WebHawk{reset} {module}{active}{reset} {job_bit}{mark}>{reset} "
+    return f"{brand}WebHawk{reset} {job_bit}{mark}>{reset} "
+
+
+def _prompt_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("TERM", "") in {"", "dumb"}:
+        return False
+    return _stdout_is_tty()
+
+
+def _stdout_is_tty() -> bool:
+    try:
+        return bool(sys.stdout.isatty())
+    except (AttributeError, ValueError):
+        return False
 
 
 def run_console(
@@ -222,8 +375,25 @@ def run_console(
             transcript.extend(load_history(history_path()))
     else:
         reader = read_line
-    print_banner()
+    from hawk.modules.snare import attach_console, job_tag, stop_listener
+
+    def _live(line: str) -> None:
+        interactive = remember and _stdout_is_tty()
+        if not interactive:
+            print(line, flush=True)
+            return
+        sys.stdout.write("\r\033[2K" + line + "\n")
+        sys.stdout.flush()
+        try:
+            import readline
+
+            readline.redisplay()
+        except Exception:
+            pass
+
+    attach_console(_live)
     try:
+        print_banner()
         while True:
             state.active = active
             try:
@@ -266,6 +436,11 @@ def run_console(
             if should_leave:
                 return 0
     finally:
+        if job_tag():
+            stop_listener()
+        else:
+            stop_listener(quiet=True)
+        attach_console(None)
         if remember:
             save_history(history_path(), transcript)
 
@@ -299,7 +474,10 @@ def _dispatch_line(
     if head == "show":
         topic = rest[0] if rest else "modules"
         if topic in ("modules", "module"):
-            print_loadable(tool_file)
+            if len(rest) > 2:
+                ui.console.print("[info]show modules[/info] takes one group name.")
+            else:
+                print_loadable(tool_file, rest[1] if len(rest) > 1 else None)
         elif topic == "options":
             if active is None:
                 ui.console.print("No module is selected. [info]use[/info] one, then [info]show options[/info].")
@@ -344,7 +522,10 @@ def _dispatch_line(
             unset_option(settings.setdefault(active, {}), rest[0])
         return False, active
     if head in ("modules", "commands"):
-        print_loadable(tool_file)
+        if len(rest) > 1:
+            ui.console.print("[info]modules[/info] takes one group name.")
+        else:
+            print_loadable(tool_file, rest[0] if rest else None)
         return False, active
     if head == "version":
         ui.console.print(f"WebHawk {VERSION}")

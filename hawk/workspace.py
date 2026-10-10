@@ -40,6 +40,10 @@ def requests_dir() -> Path:
     return workspace_dir() / "requests"
 
 
+def responses_dir() -> Path:
+    return workspace_dir() / "responses"
+
+
 def scope_is_active() -> bool:
     return scope_path().is_file()
 
